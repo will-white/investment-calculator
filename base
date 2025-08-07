@@ -1,0 +1,364 @@
+import React, { useState, ChangeEvent, FormEvent, useMemo } from 'react';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts';
+
+// --- Types and Interfaces ---
+type Frequency = 'Annually' | 'Semi-Annually' | 'Quarterly' | 'Monthly';
+
+interface TimelineDataPoint {
+  age: number;
+  balance: number;
+  phase: 'contribution' | 'withdrawal';
+  annualContribution?: number; // Net contribution for the year
+  annualWithdrawal?: number;   // Net withdrawal for the year
+}
+
+interface CalculationResults {
+  withdrawalStartingBalance: number;
+  ageAtRetirement: number;
+  yearsToLast: number;
+  monthsToLast: number;
+  fundsLastOverMaxTime: boolean;
+  maxWithdrawalCalcYears: number;
+  timelineData: TimelineDataPoint[];
+}
+
+// --- Helper Functions ---
+const getPeriodsPerYear = (freq: Frequency): number => {
+  switch (freq) {
+    case 'Monthly': return 12;
+    case 'Quarterly': return 4;
+    case 'Semi-Annually': return 2;
+    case 'Annually': default: return 1;
+  }
+};
+
+const formatCurrency = (value: number): string => {
+  return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+// --- Main App Component ---
+const App: React.FC = () => {
+  // --- Contribution Inputs ---
+  const [currentAge, setCurrentAge] = useState<string>('30');
+  const [yearsToContribute, setYearsToContribute] = useState<string>('35'); // e.g., contribute until age 65
+  const [startingBalance, setStartingBalance] = useState<string>('25000');
+  const [amountToContribute, setAmountToContribute] = useState<string>('500'); // Amount PER FREQUENCY
+  const [contributionFrequency, setContributionFrequency] = useState<Frequency>('Monthly');
+  const [contributionAnnualReturn, setContributionAnnualReturn] = useState<string>('7'); // %
+  const [expectedAnnualInflation, setExpectedAnnualInflation] = useState<string>('2.5'); // %
+  const [adjustContributionForInflation, setAdjustContributionForInflation] = useState<boolean>(true);
+
+  // --- Withdrawal Inputs ---
+  const [withdrawalAnnualReturn, setWithdrawalAnnualReturn] = useState<string>('5'); // %
+  const [amountToWithdraw, setAmountToWithdraw] = useState<string>('4000'); // Initial amount PER FREQUENCY
+  const [withdrawalFrequency, setWithdrawalFrequency] = useState<Frequency>('Monthly');
+  const [adjustWithdrawalForInflation, setAdjustWithdrawalForInflation] = useState<boolean>(true);
+
+  // --- Results State ---
+  const [results, setResults] = useState<CalculationResults | null>(null);
+  const [calculationError, setCalculationError] = useState<string>('');
+
+  // --- Derived Display Values (Read-only) ---
+  const ageAtRetirementDisplay = useMemo(() => {
+    const ca = parseFloat(currentAge);
+    const ytc = parseFloat(yearsToContribute);
+    return (!isNaN(ca) && !isNaN(ytc) && ytc > 0) ? (ca + ytc).toString() : 'N/A';
+  }, [currentAge, yearsToContribute]);
+
+  const withdrawalBeginningBalanceDisplay = useMemo(() => {
+    return results ? formatCurrency(results.withdrawalStartingBalance) : 'N/A';
+  }, [results]);
+
+  const withdrawalsToLastDisplay = useMemo(() => {
+    if (!results) return 'N/A';
+    if (results.fundsLastOverMaxTime) return `Over ${results.maxWithdrawalCalcYears} years`;
+    return `${results.yearsToLast} years, ${results.monthsToLast} months`;
+  }, [results]);
+
+
+  // --- Main Calculation Logic ---
+  const handleCalculate = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setCalculationError('');
+    setResults(null);
+
+    // --- Parse All Inputs ---
+    const pCurrentAge = parseFloat(currentAge);
+    const pYearsToContribute = parseFloat(yearsToContribute);
+    const pStartingBalance = parseFloat(startingBalance);
+    const pAmountToContribute = parseFloat(amountToContribute);
+    const pContribAnnualReturn = parseFloat(contributionAnnualReturn) / 100;
+    const pAnnualInflation = parseFloat(expectedAnnualInflation) / 100;
+
+    const pWithdrawalAnnualReturn = parseFloat(withdrawalAnnualReturn) / 100;
+    const pAmountToWithdraw = parseFloat(amountToWithdraw);
+
+    // --- Validate Inputs ---
+    const allInputs = [
+        pCurrentAge, pYearsToContribute, pStartingBalance, pAmountToContribute,
+        pContribAnnualReturn, pAnnualInflation, pWithdrawalAnnualReturn, pAmountToWithdraw
+    ];
+    if (allInputs.some(isNaN) || pCurrentAge < 0 || pYearsToContribute <= 0 || pStartingBalance < 0 || pAmountToContribute < 0 || pAmountToWithdraw < 0) {
+        setCalculationError('Please enter valid, non-negative numbers for all inputs. Years to contribute must be positive.');
+        return;
+    }
+    if (pContribAnnualReturn < -1 || pWithdrawalAnnualReturn < -1 || pAnnualInflation < -1) {
+        setCalculationError('Rates (return, inflation) cannot be less than -100%.');
+        return;
+    }
+
+    const timelineData: TimelineDataPoint[] = [];
+    const contribPeriodsPerYear = getPeriodsPerYear(contributionFrequency);
+    const withdrawalPeriodsPerYear = getPeriodsPerYear(withdrawalFrequency);
+
+    // --- Contribution Phase ---
+    let currentBalance = pStartingBalance;
+    let currentPeriodicContribution = pAmountToContribute; // This is the amount per contribution period
+    const ageAtRetirement = pCurrentAge + pYearsToContribute;
+
+    timelineData.push({ age: pCurrentAge, balance: currentBalance, phase: 'contribution', annualContribution: 0 });
+
+    for (let yearIndex = 0; yearIndex < pYearsToContribute; yearIndex++) {
+        const ageThisYear = pCurrentAge + yearIndex;
+        let totalAnnualContribution = 0;
+
+        if (yearIndex > 0 && adjustContributionForInflation) {
+            currentPeriodicContribution *= (1 + pAnnualInflation);
+        }
+
+        for (let period = 0; period < contribPeriodsPerYear; period++) {
+            currentBalance += currentPeriodicContribution;
+            totalAnnualContribution += currentPeriodicContribution;
+        }
+        currentBalance *= (1 + pContribAnnualReturn); // Apply annual return at year end
+        
+        timelineData.push({
+            age: ageThisYear + 1,
+            balance: parseFloat(currentBalance.toFixed(2)),
+            phase: 'contribution',
+            annualContribution: parseFloat(totalAnnualContribution.toFixed(2))
+        });
+    }
+    const withdrawalStartingBalance = parseFloat(currentBalance.toFixed(2));
+
+    // --- Withdrawal Phase ---
+    let withdrawalBalance = withdrawalStartingBalance;
+    let currentPeriodicWithdrawal = pAmountToWithdraw; // Initial amount per withdrawal period
+    let totalMonthsLasted = 0;
+    const maxWithdrawalCalcYears = 70; // Max duration to calculate for (e.g., up to ageRetirement + 70)
+
+    for (let yearIndex = 0; yearIndex < maxWithdrawalCalcYears; yearIndex++) {
+        const ageThisYear = ageAtRetirement + yearIndex;
+        if (withdrawalBalance <= 0 && yearIndex > 0) break; // Already depleted in a previous year.
+
+        let totalAnnualWithdrawal = 0;
+
+        if (yearIndex > 0 && adjustWithdrawalForInflation) {
+            currentPeriodicWithdrawal *= (1 + pAnnualInflation);
+        }
+        
+        // Apply annual return at START of year for withdrawal phase
+        withdrawalBalance *= (1 + pWithdrawalAnnualReturn);
+
+        let withdrawnThisYearSuccessfully = 0;
+        let monthsThisYearCovered = 0;
+
+        for (let period = 0; period < withdrawalPeriodsPerYear; period++) {
+            if (withdrawalBalance >= currentPeriodicWithdrawal) {
+                withdrawalBalance -= currentPeriodicWithdrawal;
+                withdrawnThisYearSuccessfully += currentPeriodicWithdrawal;
+                monthsThisYearCovered += (12 / withdrawalPeriodsPerYear);
+            } else {
+                if (withdrawalBalance > 0) { // Partial withdrawal
+                    monthsThisYearCovered += (withdrawalBalance / currentPeriodicWithdrawal) * (12 / withdrawalPeriodsPerYear);
+                    withdrawnThisYearSuccessfully += withdrawalBalance;
+                    withdrawalBalance = 0;
+                }
+                break; 
+            }
+        }
+        
+        totalMonthsLasted += monthsThisYearCovered;
+        totalAnnualWithdrawal = withdrawnThisYearSuccessfully;
+        
+        // Add data point for end of this withdrawal year
+        // Ensure age is correctly progressing from the last contribution point
+        timelineData.push({
+            age: ageThisYear + 1, 
+            balance: parseFloat(Math.max(0, withdrawalBalance).toFixed(2)),
+            phase: 'withdrawal',
+            annualWithdrawal: parseFloat(totalAnnualWithdrawal.toFixed(2))
+        });
+        
+        if (withdrawalBalance <= 0) break;
+    }
+
+    const yearsLasted = Math.floor(totalMonthsLasted / 12);
+    const monthsLastedRemainder = Math.round(totalMonthsLasted % 12); // Use Math.round for closer month
+    const fundsOverMax = totalMonthsLasted >= (maxWithdrawalCalcYears * 12) && withdrawalBalance > 0;
+
+    setResults({
+        withdrawalStartingBalance: withdrawalStartingBalance,
+        ageAtRetirement: ageAtRetirement,
+        yearsToLast: yearsLasted,
+        monthsToLast: monthsLastedRemainder,
+        fundsLastOverMaxTime: fundsOverMax,
+        maxWithdrawalCalcYears: maxWithdrawalCalcYears,
+        timelineData: timelineData
+    });
+  };
+  
+  // --- Input Field Component ---
+  const renderInputField = (
+    label: string, id: string, value: string,
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => void,
+    type: string = 'number', unit?: string, options?: string[], disabled: boolean = false,
+    helpText?: string
+  ) => (
+    <div className="mb-4">
+      <label htmlFor={id} className="block text-sm font-medium text-slate-300 mb-1">{label}</label>
+      {type === 'select' && options ? (
+        <select id={id} value={value} onChange={onChange} disabled={disabled}
+          className="mt-1 block w-full pl-3 pr-10 py-2 text-base bg-slate-700 border-slate-600 focus:outline-none focus:ring-sky-500 focus:border-sky-500 sm:text-sm rounded-md text-white disabled:bg-slate-600 disabled:text-slate-400">
+          {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+        </select>
+      ) : (
+        <div className="relative">
+          <input type={type} id={id} value={value} onChange={onChange} disabled={disabled}
+            min={type === 'number' ? "0" : undefined}
+            step={type === 'number' ? (id.includes('Rate') || id.includes('Inflation') ? "0.01" : "any") : undefined}
+            className="mt-1 block w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-sky-500 focus:border-sky-500 sm:text-sm text-white disabled:bg-slate-600 disabled:text-slate-400"
+          />
+          {unit && <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none"><span className="text-slate-400 sm:text-sm">{unit}</span></div>}
+        </div>
+      )}
+      {helpText && <p className="mt-1 text-xs text-slate-400">{helpText}</p>}
+    </div>
+  );
+
+  const renderCheckboxField = (label: string, id: string, checked: boolean, onChange: (e: ChangeEvent<HTMLInputElement>) => void) => (
+    <div className="flex items-center my-4">
+      <input id={id} type="checkbox" checked={checked} onChange={onChange} className="h-4 w-4 text-sky-500 border-slate-600 rounded focus:ring-sky-400 bg-slate-700"/>
+      <label htmlFor={id} className="ml-2 block text-sm text-slate-300">{label}</label>
+    </div>
+  );
+
+  // --- Chart Tooltip Formatters ---
+  const currencyTooltipFormatter = (value: number, name: string) => {
+    if (name === "Balance") return formatCurrency(value);
+    return value.toString();
+  };
+  const ageTooltipFormatter = (value: number) => `Age: ${value}`;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 py-8 px-4 sm:px-6 lg:px-8 font-sans text-white">
+      <div className="max-w-6xl mx-auto">
+        <header className="text-center mb-10">
+          <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl lg:text-6xl bg-clip-text text-transparent bg-gradient-to-r from-sky-400 to-cyan-300">
+            Comprehensive Retirement Calculator
+          </h1>
+          <p className="mt-4 text-xl text-slate-300">Plan your savings and retirement income.</p>
+        </header>
+
+        <form onSubmit={handleCalculate} className="bg-slate-800/70 p-6 sm:p-8 rounded-xl shadow-2xl backdrop-blur-sm">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-8">
+            {/* Contribution Information Section */}
+            <section>
+              <h2 className="text-2xl font-semibold mb-6 text-sky-400 border-b-2 border-sky-700 pb-2">
+                Contribution Information
+              </h2>
+              {renderInputField('Current Age', 'currentAge', currentAge, (e) => setCurrentAge(e.target.value))}
+              {renderInputField('Years to Contribute', 'yearsToContribute', yearsToContribute, (e) => setYearsToContribute(e.target.value))}
+              {renderInputField('Current Savings Balance (Starting)', 'startingBalance', startingBalance, (e) => setStartingBalance(e.target.value), 'number', '$')}
+              {renderInputField('Amount to Contribute', 'amountToContribute', amountToContribute, (e) => setAmountToContribute(e.target.value), 'number', '$', undefined, false, 'Amount per selected frequency below.')}
+              {renderInputField('Contribution Frequency', 'contributionFrequency', contributionFrequency, (e) => setContributionFrequency(e.target.value as Frequency), 'select', undefined, ['Monthly', 'Quarterly', 'Semi-Annually', 'Annually'])}
+              {renderCheckboxField('Increase Contributions with Inflation Annually', 'adjustContributionForInflation', adjustContributionForInflation, (e) => setAdjustContributionForInflation(e.target.checked))}
+              {renderInputField('Expected Annual Return (During Contribution)', 'contributionAnnualReturn', contributionAnnualReturn, (e) => setContributionAnnualReturn(e.target.value), 'number', '%')}
+              {renderInputField('Expected Annual Inflation Rate', 'expectedAnnualInflation', expectedAnnualInflation, (e) => setExpectedAnnualInflation(e.target.value), 'number', '%')}
+            </section>
+
+            {/* Withdrawal Information Section */}
+            <section>
+              <h2 className="text-2xl font-semibold mb-6 text-teal-400 border-b-2 border-teal-700 pb-2">
+                Withdrawal Information
+              </h2>
+              {renderInputField('Retirement Age (Withdrawals Begin)', 'ageAtRetirementDisplay', ageAtRetirementDisplay, () => {}, 'text', undefined, undefined, true)}
+              {renderInputField('Withdrawal Beginning Balance', 'withdrawalBeginningBalanceDisplay', withdrawalBeginningBalanceDisplay, () => {}, 'text', undefined, undefined, true, 'Calculated from contribution phase.')}
+              {renderInputField('Amount to Withdraw (Initial)', 'amountToWithdraw', amountToWithdraw, (e) => setAmountToWithdraw(e.target.value), 'number', '$', undefined, false, 'Initial amount per selected frequency below.')}
+              {renderInputField('Withdrawal Frequency', 'withdrawalFrequency', withdrawalFrequency, (e) => setWithdrawalFrequency(e.target.value as Frequency), 'select', undefined, ['Monthly', 'Quarterly', 'Semi-Annually', 'Annually'])}
+              {renderCheckboxField('Increase Withdrawals with Inflation Annually', 'adjustWithdrawalForInflation', adjustWithdrawalForInflation, (e) => setAdjustWithdrawalForInflation(e.target.checked))}
+              {renderInputField('Expected Annual Return (During Retirement)', 'withdrawalAnnualReturn', withdrawalAnnualReturn, (e) => setWithdrawalAnnualReturn(e.target.value), 'number', '%')}
+              {renderInputField('Funds Projected to Last For', 'withdrawalsToLastDisplay', withdrawalsToLastDisplay, () => {}, 'text', undefined, undefined, true, 'Calculated duration based on inputs.')}
+            </section>
+          </div>
+
+          <div className="mt-10 text-center">
+            <button type="submit" className="w-full max-w-xs bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-semibold py-3 px-8 rounded-lg shadow-md hover:shadow-lg transform hover:scale-105 transition-all duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-800 focus:ring-emerald-400 text-lg">
+              Calculate Projection
+            </button>
+          </div>
+        </form>
+
+        {calculationError && <p className="mt-6 text-red-400 bg-red-900/50 p-4 rounded-md text-center font-medium">{calculationError}</p>}
+        
+        {results && (
+          <div className="mt-10 p-6 bg-slate-800/70 rounded-xl shadow-2xl backdrop-blur-sm">
+            <h2 className="text-2xl sm:text-3xl font-semibold mb-6 text-green-400 text-center">Financial Projection Results</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 text-center">
+                <div>
+                    <p className="text-sm text-slate-400 uppercase tracking-wider">Retirement Age</p>
+                    <p className="text-3xl font-bold text-sky-300">{results.ageAtRetirement}</p>
+                </div>
+                <div>
+                    <p className="text-sm text-slate-400 uppercase tracking-wider">Retirement Starting Balance</p>
+                    <p className="text-3xl font-bold text-sky-300">{formatCurrency(results.withdrawalStartingBalance)}</p>
+                </div>
+                <div>
+                    <p className="text-sm text-slate-400 uppercase tracking-wider">Funds Last For</p>
+                    <p className="text-3xl font-bold text-sky-300">
+                        {results.fundsLastOverMaxTime ? `Over ${results.maxWithdrawalCalcYears} yrs` : `${results.yearsToLast} yrs, ${results.monthsToLast} mos`}
+                    </p>
+                </div>
+            </div>
+
+            <h3 className="text-xl font-semibold mb-4 text-green-300">Balance Over Time (by Age)</h3>
+            <ResponsiveContainer width="100%" height={400}>
+              <LineChart data={results.timelineData} margin={{ top: 5, right: 20, left: 25, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} stroke="#94a3b8"/>
+                <XAxis dataKey="age" stroke="#cbd5e1" name="Age" unit=" yrs" tickFormatter={(tick) => Math.round(tick).toString()}/>
+                <YAxis stroke="#cbd5e1" name="Balance" tickFormatter={formatCurrency} domain={[0, 'dataMax']} allowDataOverflow={false}/>
+                <Tooltip 
+                  formatter={currencyTooltipFormatter} 
+                  labelFormatter={ageTooltipFormatter}
+                  contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.9)', border: '1px solid #475569', borderRadius: '0.5rem' }}
+                  itemStyle={{ color: '#e2e8f0' }}
+                  labelStyle={{ color: '#94a3b8', fontWeight: 'bold' }}
+                  cursor={{ stroke: '#sky-500', strokeWidth: 1, strokeDasharray: '3 3'}}
+                />
+                <Legend wrapperStyle={{ color: '#e2e8f0', paddingTop: '10px' }} />
+                <Line type="monotone" dataKey="balance" name="Account Balance" stroke="#2dd4bf" strokeWidth={2.5} dot={{ r: 2, fill: '#2dd4bf' }} activeDot={{ r: 6, stroke: '#14b8a6', strokeWidth: 2 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        
+        <footer className="text-center mt-12 py-6 border-t border-slate-700">
+            <p className="text-sm text-slate-400">
+                Calculations are estimates and for illustrative purposes only. Always consult with a qualified financial advisor for personalized advice.
+            </p>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
+export default App;
